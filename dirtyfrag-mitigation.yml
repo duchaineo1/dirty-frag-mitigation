@@ -15,20 +15,26 @@
 
     - name: Check whether any of those modules are built into the kernel
       shell: |
-        cfg=/boot/config-$(uname -r)
-        [ -f "$cfg" ] || { [ -f /proc/config.gz ] && cfg=/proc/config.gz; }
-        if [[ "$cfg" == *.gz ]]; then
-          zcat "$cfg"
-        else
-          cat "$cfg"
-        fi 2>/dev/null | grep -E '^CONFIG_(ESP4|ESP6|RXRPC)=y' || true
+        for cfg in /boot/config-$(uname -r) /proc/config.gz /boot/config; do
+          [ -f "$cfg" ] || continue
+          if [[ "$cfg" == *.gz ]]; then
+            zcat "$cfg"
+          else
+            cat "$cfg"
+          fi 2>/dev/null | grep -E '^CONFIG_(ESP4|ESP6|RXRPC)=y' || true
+          exit 0
+        done
+        echo "NO_KERNEL_CONFIG"
+      args:
+        executable: /bin/bash
       register: builtin_check
       changed_when: false
+      timeout: 10
 
     - name: Set impact facts
       set_fact:
         modules_loaded: "{{ loaded_check.stdout_lines | select('ne', '') | list }}"
-        modules_builtin: "{{ builtin_check.stdout_lines | select('ne', '') | list }}"
+        modules_builtin: "{{ builtin_check.stdout_lines | reject('search', 'NO_KERNEL_CONFIG') | select('ne', '') | list }}"
 
     - name: Derive safe-to-patch flag
       set_fact:
