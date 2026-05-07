@@ -1,0 +1,83 @@
+---
+- name: DirtyFrag mitigation (xfrm-ESP + RxRPC page-cache write privilege escalation)
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    modprobe_conf: /etc/modprobe.d/dirtyfrag.conf
+
+  tasks:
+    - name: Check which exploit-relevant modules are currently loaded
+      shell: lsmod | awk 'NR>1 {print $1}' | grep -E '^(esp4|esp6|rxrpc)$' || true
+      register: loaded_check
+      changed_when: false
+
+    - name: Check whether any of those modules are built into the kernel
+      shell: |
+        cfg=/boot/config-$(uname -r)
+        [ -f "$cfg" ] || { [ -f /proc/config.gz ] && cfg=/proc/config.gz; }
+        if [[ "$cfg" == *.gz ]]; then
+          zcat "$cfg"
+        else
+          cat "$cfg"
+        fi 2>/dev/null | grep -E '^CONFIG_(ESP4|ESP6|RXRPC)=y' || true
+      register: builtin_check
+      changed_when: false
+
+    - name: Set impact facts
+      set_fact:
+        modules_loaded: "{{ loaded_check.stdout_lines | select('ne', '') | list }}"
+        modules_builtin: "{{ builtin_check.stdout_lines | select('ne', '') | list }}"
+
+    - name: Derive safe-to-patch flag
+      set_fact:
+        safe_to_patch: "{{ (modules_loaded | length == 0) and (modules_builtin | length == 0) }}"
+
+    - name: Report impact assessment
+      debug:
+        msg: >-
+          {% if safe_to_patch %}
+          SAFE — no conflicting modules loaded or built-in. Fix will be applied.
+          {% else %}
+          SKIP — host may be adversely impacted.
+          Loaded modules: {{ modules_loaded | join(', ') or 'none' }}.
+          Built-in (=y, cannot be blocked): {{ modules_builtin | join(', ') or 'none' }}.
+          {% endif %}
+
+    - name: Write modprobe blacklist
+      copy:
+        dest: "{{ modprobe_conf }}"
+        content: |
+          # DirtyFrag mitigation: block xfrm-ESP and RxRPC exploit vectors
+          install esp4 /bin/false
+          install esp6 /bin/false
+          install rxrpc /bin/false
+        owner: root
+        group: root
+        mode: "0644"
+      when: safe_to_patch
+
+    - name: Unload modules if somehow present
+      modprobe:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - esp4
+        - esp6
+        - rxrpc
+      when: safe_to_patch
+      failed_when: false
+
+    - name: Confirm config on disk
+      debug:
+        msg: "{{ modprobe_conf }} written — host is mitigated."
+      when: safe_to_patch
+
+    - name: Flag skipped hosts
+      debug:
+        msg: >-
+          {{ modprobe_conf }} NOT written.
+          Manual review required: loaded={{ modules_loaded | join(', ') or 'none' }},
+          built-in={{ modules_builtin | join(', ') or 'none' }}.
+      when: not safe_to_patch
